@@ -104,11 +104,20 @@ export class GradleUserHomeCache {
 
     /**
      * Restore any extracted cache entries after the main Gradle User Home entry is restored.
+     * For EFS backend, skip extraction as we store the entire Gradle User Home.
      */
     async afterRestore(listener: CacheListener): Promise<void> {
         await this.debugReportGradleUserHomeSize('as restored from cache')
-        await new GradleHomeEntryExtractor(this.gradleUserHome, this.cacheConfig).restore(listener)
-        await new ConfigurationCacheEntryExtractor(this.gradleUserHome, this.cacheConfig).restore(listener)
+
+        const cacheBackend = this.cacheConfig.getCacheBackend()
+        if (cacheBackend === CacheBackend.GitHub) {
+            // Only extract individual artifacts for GitHub Actions cache (space optimization)
+            await new GradleHomeEntryExtractor(this.gradleUserHome, this.cacheConfig).restore(listener)
+            await new ConfigurationCacheEntryExtractor(this.gradleUserHome, this.cacheConfig).restore(listener)
+        } else {
+            core.info('EFS backend: Skipping artifact extraction (entire Gradle User Home is cached)')
+        }
+
         await this.deleteExcludedPaths()
         await this.debugReportGradleUserHomeSize('after restoring common artifacts')
     }
@@ -164,17 +173,26 @@ export class GradleUserHomeCache {
 
     /**
      * Extract and save any defined extracted cache entries prior to the main Gradle User Home entry being saved.
+     * For EFS backend, skip extraction as we store the entire Gradle User Home.
      */
     async beforeSave(listener: CacheListener): Promise<void> {
         await this.debugReportGradleUserHomeSize('before saving common artifacts')
         await this.deleteExcludedPaths()
-        await Promise.all([
-            new GradleHomeEntryExtractor(this.gradleUserHome, this.cacheConfig).extract(listener),
-            new ConfigurationCacheEntryExtractor(this.gradleUserHome, this.cacheConfig).extract(listener)
-        ])
-        await this.debugReportGradleUserHomeSize(
-            "after extracting common artifacts (only 'caches' and 'notifications' will be stored)"
-        )
+
+        const cacheBackend = this.cacheConfig.getCacheBackend()
+        if (cacheBackend === CacheBackend.GitHub) {
+            // Only extract individual artifacts for GitHub Actions cache (space optimization)
+            await Promise.all([
+                new GradleHomeEntryExtractor(this.gradleUserHome, this.cacheConfig).extract(listener),
+                new ConfigurationCacheEntryExtractor(this.gradleUserHome, this.cacheConfig).extract(listener)
+            ])
+            await this.debugReportGradleUserHomeSize(
+                "after extracting common artifacts (only 'caches' and 'notifications' will be stored)"
+            )
+        } else {
+            core.info('EFS backend: Skipping artifact extraction (storing entire Gradle User Home)')
+            await this.debugReportGradleUserHomeSize('full Gradle User Home will be stored to EFS')
+        }
     }
 
     /**
