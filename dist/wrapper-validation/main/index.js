@@ -110262,7 +110262,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.WrapperValidationConfig = exports.GradleExecutionConfig = exports.PluginRepositoryConfig = exports.BuildScanConfig = exports.JobSummaryOption = exports.SummaryConfig = exports.CacheCleanupOption = exports.CacheConfig = exports.DependencyGraphOption = exports.DependencyGraphConfig = exports.ACTION_METADATA_DIR = void 0;
+exports.WrapperValidationConfig = exports.GradleExecutionConfig = exports.PluginRepositoryConfig = exports.BuildScanConfig = exports.JobSummaryOption = exports.SummaryConfig = exports.CacheBackend = exports.CacheCleanupOption = exports.CacheConfig = exports.DependencyGraphOption = exports.DependencyGraphConfig = exports.ACTION_METADATA_DIR = void 0;
 exports.getJobMatrix = getJobMatrix;
 exports.getGithubToken = getGithubToken;
 exports.getWorkspaceDirectory = getWorkspaceDirectory;
@@ -110420,6 +110420,24 @@ class CacheConfig {
     getCacheExcludes() {
         return core.getMultilineInput('gradle-home-cache-excludes');
     }
+    getCacheBackend() {
+        const val = core.getInput('cache-backend');
+        switch (val.toLowerCase().trim()) {
+            case '':
+            case 'github':
+                return CacheBackend.GitHub;
+            case 'efs':
+                return CacheBackend.EFS;
+        }
+        throw TypeError(`The value '${val}' is not valid for cache-backend. Valid values are: [github, efs].`);
+    }
+    getEfsCachePath() {
+        const val = core.getInput('efs-cache-path');
+        if (this.getCacheBackend() === CacheBackend.EFS && !val) {
+            throw TypeError('efs-cache-path is required when cache-backend is set to efs');
+        }
+        return val;
+    }
 }
 exports.CacheConfig = CacheConfig;
 var CacheCleanupOption;
@@ -110428,6 +110446,11 @@ var CacheCleanupOption;
     CacheCleanupOption["OnSuccess"] = "on-success";
     CacheCleanupOption["Always"] = "always";
 })(CacheCleanupOption || (exports.CacheCleanupOption = CacheCleanupOption = {}));
+var CacheBackend;
+(function (CacheBackend) {
+    CacheBackend["GitHub"] = "github";
+    CacheBackend["EFS"] = "efs";
+})(CacheBackend || (exports.CacheBackend = CacheBackend = {}));
 class SummaryConfig {
     shouldGenerateJobSummary(hasFailure) {
         if (!process.env[summary_1.SUMMARY_ENV_VAR]) {

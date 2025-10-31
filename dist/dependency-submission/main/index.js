@@ -156734,6 +156734,8 @@ exports.saveCache = saveCache;
 exports.cacheDebug = cacheDebug;
 exports.handleCacheFailure = handleCacheFailure;
 exports.tryDelete = tryDelete;
+exports.restoreCacheFromEfs = restoreCacheFromEfs;
+exports.saveCacheToEfs = saveCacheToEfs;
 const core = __importStar(__nccwpck_require__(37484));
 const cache = __importStar(__nccwpck_require__(5116));
 const exec = __importStar(__nccwpck_require__(95236));
@@ -156855,6 +156857,98 @@ async function delay(ms) {
 async function getJavaProcesses() {
     const jpsOutput = await exec.getExecOutput('jps', ['-lm']);
     return jpsOutput.stdout;
+}
+async function restoreCacheFromEfs(cachePath, cacheKey, efsMountPath, listener) {
+    listener.markRequested(cacheKey, []);
+    const efsCachePath = path.join(efsMountPath, cacheKey);
+    if (!fs.existsSync(efsMountPath)) {
+        listener.markNotRestored(`EFS mount path not found: ${efsMountPath}`);
+        core.warning(`EFS mount path not found: ${efsMountPath}`);
+        return false;
+    }
+    if (!fs.existsSync(efsCachePath)) {
+        listener.markNotRestored('Cache not found in EFS');
+        cacheDebug(`Cache not found in EFS at: ${efsCachePath}`);
+        return false;
+    }
+    try {
+        const startTime = Date.now();
+        for (const targetPath of cachePath) {
+            const sourcePath = path.join(efsCachePath, path.basename(targetPath));
+            if (fs.existsSync(sourcePath)) {
+                const targetDir = path.dirname(targetPath);
+                if (!fs.existsSync(targetDir)) {
+                    fs.mkdirSync(targetDir, { recursive: true });
+                }
+                cacheDebug(`Restoring from EFS: ${sourcePath} -> ${targetPath}`);
+                await exec.exec('rsync', ['-a', `${sourcePath}/`, `${targetPath}/`]);
+            }
+            else {
+                cacheDebug(`Source path not found in EFS: ${sourcePath}`);
+            }
+        }
+        const restoreTime = Date.now() - startTime;
+        const size = await getDirectorySize(efsCachePath);
+        listener.markRestored(cacheKey, size, restoreTime);
+        core.info(`Restored cache from EFS: ${cacheKey} (${formatBytes(size)}) in ${restoreTime}ms`);
+        return true;
+    }
+    catch (error) {
+        listener.markNotRestored(error.message);
+        core.warning(`Failed to restore from EFS: ${error}`);
+        return false;
+    }
+}
+async function saveCacheToEfs(cachePath, cacheKey, efsMountPath, listener) {
+    if (!fs.existsSync(efsMountPath)) {
+        listener.markNotSaved(`EFS mount path not found: ${efsMountPath}`);
+        core.warning(`EFS mount path not found: ${efsMountPath}`);
+        return;
+    }
+    const efsCachePath = path.join(efsMountPath, cacheKey);
+    try {
+        const startTime = Date.now();
+        fs.mkdirSync(efsCachePath, { recursive: true });
+        for (const sourcePath of cachePath) {
+            if (fs.existsSync(sourcePath)) {
+                const targetPath = path.join(efsCachePath, path.basename(sourcePath));
+                cacheDebug(`Saving to EFS: ${sourcePath} -> ${targetPath}`);
+                await exec.exec('rsync', ['-a', '--delete', `${sourcePath}/`, `${targetPath}/`]);
+            }
+            else {
+                cacheDebug(`Source path not found: ${sourcePath}`);
+            }
+        }
+        const saveTime = Date.now() - startTime;
+        const size = await getDirectorySize(efsCachePath);
+        listener.markSaved(cacheKey, size, saveTime);
+        core.info(`Saved cache to EFS: ${cacheKey} (${formatBytes(size)}) in ${saveTime}ms`);
+    }
+    catch (error) {
+        listener.markNotSaved(error.message);
+        core.warning(`Failed to save to EFS: ${error}`);
+    }
+}
+async function getDirectorySize(dirPath) {
+    try {
+        const result = await exec.getExecOutput('du', ['-sb', dirPath], { silent: true, ignoreReturnCode: true });
+        if (result.exitCode === 0) {
+            const size = parseInt(result.stdout.split('\t')[0]);
+            return isNaN(size) ? 0 : size;
+        }
+    }
+    catch (error) {
+        cacheDebug(`Failed to get directory size: ${error}`);
+    }
+    return 0;
+}
+function formatBytes(bytes) {
+    if (bytes === 0)
+        return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
 }
 
 
@@ -157387,16 +157481,32 @@ class GradleUserHomeCache {
     async restore(listener) {
         const entryListener = listener.entry(this.cacheDescription);
         const cacheKey = (0, cache_key_1.generateCacheKey)(this.cacheName, this.cacheConfig);
+        const cachePath = this.getCachePath();
         (0, cache_utils_1.cacheDebug)(`Requesting ${this.cacheDescription} with
     key:${cacheKey.key}
-    restoreKeys:[${cacheKey.restoreKeys}]`);
-        const cachePath = this.getCachePath();
-        const cacheResult = await (0, cache_utils_1.restoreCache)(cachePath, cacheKey.key, cacheKey.restoreKeys, entryListener);
-        if (!cacheResult) {
+    restoreKeys:[${cacheKey.restoreKeys}]
+    backend:${this.cacheConfig.getCacheBackend()}`);
+        const cacheBackend = this.cacheConfig.getCacheBackend();
+        let restored = false;
+        if (cacheBackend === configuration_1.CacheBackend.EFS) {
+            const efsMountPath = this.cacheConfig.getEfsCachePath();
+            core.info(`Using EFS cache backend at ${efsMountPath}`);
+            restored = await (0, cache_utils_1.restoreCacheFromEfs)(cachePath, cacheKey.key, efsMountPath, entryListener);
+            if (restored) {
+                core.saveState(RESTORED_CACHE_KEY_KEY, cacheKey.key);
+            }
+        }
+        else {
+            const cacheResult = await (0, cache_utils_1.restoreCache)(cachePath, cacheKey.key, cacheKey.restoreKeys, entryListener);
+            if (cacheResult) {
+                core.saveState(RESTORED_CACHE_KEY_KEY, cacheResult.key);
+                restored = true;
+            }
+        }
+        if (!restored) {
             core.info(`${this.cacheDescription} cache not found. Will initialize empty.`);
             return;
         }
-        core.saveState(RESTORED_CACHE_KEY_KEY, cacheResult.key);
         try {
             await this.afterRestore(listener);
         }
@@ -157415,7 +157525,8 @@ class GradleUserHomeCache {
         const cacheKey = (0, cache_key_1.generateCacheKey)(this.cacheName, this.cacheConfig).key;
         const restoredCacheKey = core.getState(RESTORED_CACHE_KEY_KEY);
         const gradleHomeEntryListener = listener.entry(this.cacheDescription);
-        if (restoredCacheKey && cacheKey === restoredCacheKey) {
+        const cacheBackend = this.cacheConfig.getCacheBackend();
+        if (cacheBackend === configuration_1.CacheBackend.GitHub && restoredCacheKey && cacheKey === restoredCacheKey) {
             core.info(`Cache hit occurred on the cache key ${cacheKey}, not saving cache.`);
             for (const entryListener of listener.cacheEntries) {
                 if (entryListener === gradleHomeEntryListener) {
@@ -157435,8 +157546,14 @@ class GradleUserHomeCache {
             return;
         }
         const cachePath = this.getCachePath();
-        await (0, cache_utils_1.saveCache)(cachePath, cacheKey, gradleHomeEntryListener);
-        return;
+        if (cacheBackend === configuration_1.CacheBackend.EFS) {
+            const efsMountPath = this.cacheConfig.getEfsCachePath();
+            core.info(`Saving to EFS cache backend at ${efsMountPath}`);
+            await (0, cache_utils_1.saveCacheToEfs)(cachePath, cacheKey, efsMountPath, gradleHomeEntryListener);
+        }
+        else {
+            await (0, cache_utils_1.saveCache)(cachePath, cacheKey, gradleHomeEntryListener);
+        }
     }
     async beforeSave(listener) {
         await this.debugReportGradleUserHomeSize('before saving common artifacts');
@@ -157656,7 +157773,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.WrapperValidationConfig = exports.GradleExecutionConfig = exports.PluginRepositoryConfig = exports.BuildScanConfig = exports.JobSummaryOption = exports.SummaryConfig = exports.CacheCleanupOption = exports.CacheConfig = exports.DependencyGraphOption = exports.DependencyGraphConfig = exports.ACTION_METADATA_DIR = void 0;
+exports.WrapperValidationConfig = exports.GradleExecutionConfig = exports.PluginRepositoryConfig = exports.BuildScanConfig = exports.JobSummaryOption = exports.SummaryConfig = exports.CacheBackend = exports.CacheCleanupOption = exports.CacheConfig = exports.DependencyGraphOption = exports.DependencyGraphConfig = exports.ACTION_METADATA_DIR = void 0;
 exports.getJobMatrix = getJobMatrix;
 exports.getGithubToken = getGithubToken;
 exports.getWorkspaceDirectory = getWorkspaceDirectory;
@@ -157814,6 +157931,24 @@ class CacheConfig {
     getCacheExcludes() {
         return core.getMultilineInput('gradle-home-cache-excludes');
     }
+    getCacheBackend() {
+        const val = core.getInput('cache-backend');
+        switch (val.toLowerCase().trim()) {
+            case '':
+            case 'github':
+                return CacheBackend.GitHub;
+            case 'efs':
+                return CacheBackend.EFS;
+        }
+        throw TypeError(`The value '${val}' is not valid for cache-backend. Valid values are: [github, efs].`);
+    }
+    getEfsCachePath() {
+        const val = core.getInput('efs-cache-path');
+        if (this.getCacheBackend() === CacheBackend.EFS && !val) {
+            throw TypeError('efs-cache-path is required when cache-backend is set to efs');
+        }
+        return val;
+    }
 }
 exports.CacheConfig = CacheConfig;
 var CacheCleanupOption;
@@ -157822,6 +157957,11 @@ var CacheCleanupOption;
     CacheCleanupOption["OnSuccess"] = "on-success";
     CacheCleanupOption["Always"] = "always";
 })(CacheCleanupOption || (exports.CacheCleanupOption = CacheCleanupOption = {}));
+var CacheBackend;
+(function (CacheBackend) {
+    CacheBackend["GitHub"] = "github";
+    CacheBackend["EFS"] = "efs";
+})(CacheBackend || (exports.CacheBackend = CacheBackend = {}));
 class SummaryConfig {
     shouldGenerateJobSummary(hasFailure) {
         if (!process.env[summary_1.SUMMARY_ENV_VAR]) {
