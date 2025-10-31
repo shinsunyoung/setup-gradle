@@ -117936,8 +117936,17 @@ class AbstractEntryExtractor {
         this.saveMetadataForCacheResults(await Promise.all(processes));
     }
     async restoreExtractedCacheEntry(artifactType, cacheKey, pattern, listener) {
-        const restoredEntry = await (0, cache_utils_1.restoreCache)(pattern.split('\n'), cacheKey, [], listener);
-        if (restoredEntry) {
+        const cacheBackend = this.cacheConfig.getCacheBackend();
+        let restored = false;
+        if (cacheBackend === configuration_1.CacheBackend.EFS) {
+            const efsMountPath = this.cacheConfig.getEfsCachePath();
+            restored = await (0, cache_utils_1.restoreCacheFromEfs)(pattern.split('\n'), cacheKey, efsMountPath, listener);
+        }
+        else {
+            const restoredEntry = await (0, cache_utils_1.restoreCache)(pattern.split('\n'), cacheKey, [], listener);
+            restored = restoredEntry !== undefined;
+        }
+        if (restored) {
             return new ExtractedCacheEntry(artifactType, pattern, cacheKey);
         }
         else {
@@ -117986,7 +117995,14 @@ class AbstractEntryExtractor {
             entryListener.markNotSaved('contents unchanged');
         }
         else {
-            await (0, cache_utils_1.saveCache)(pattern.split('\n'), cacheKey, entryListener);
+            const cacheBackend = this.cacheConfig.getCacheBackend();
+            if (cacheBackend === configuration_1.CacheBackend.EFS) {
+                const efsMountPath = this.cacheConfig.getEfsCachePath();
+                await (0, cache_utils_1.saveCacheToEfs)(pattern.split('\n'), cacheKey, efsMountPath, entryListener);
+            }
+            else {
+                await (0, cache_utils_1.saveCache)(pattern.split('\n'), cacheKey, entryListener);
+            }
         }
         for (const file of matchingFiles) {
             (0, cache_utils_1.tryDelete)(file);

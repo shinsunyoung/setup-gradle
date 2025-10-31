@@ -4,10 +4,19 @@ import * as core from '@actions/core'
 import * as glob from '@actions/glob'
 
 import {CacheEntryListener, CacheListener} from './cache-reporting'
-import {cacheDebug, hashFileNames, isCacheDebuggingEnabled, restoreCache, saveCache, tryDelete} from './cache-utils'
+import {
+    cacheDebug,
+    hashFileNames,
+    isCacheDebuggingEnabled,
+    restoreCache,
+    saveCache,
+    restoreCacheFromEfs,
+    saveCacheToEfs,
+    tryDelete
+} from './cache-utils'
 
 import {BuildResult, loadBuildResults} from '../build-results'
-import {CacheConfig, ACTION_METADATA_DIR} from '../configuration'
+import {CacheConfig, CacheBackend, ACTION_METADATA_DIR} from '../configuration'
 import {getCacheKeyBase} from './cache-key'
 import {versionIsAtLeast} from '../execution/gradle'
 
@@ -132,8 +141,20 @@ abstract class AbstractEntryExtractor {
         pattern: string,
         listener: CacheEntryListener
     ): Promise<ExtractedCacheEntry> {
-        const restoredEntry = await restoreCache(pattern.split('\n'), cacheKey, [], listener)
-        if (restoredEntry) {
+        const cacheBackend = this.cacheConfig.getCacheBackend()
+        let restored = false
+
+        if (cacheBackend === CacheBackend.EFS) {
+            // EFS backend
+            const efsMountPath = this.cacheConfig.getEfsCachePath()
+            restored = await restoreCacheFromEfs(pattern.split('\n'), cacheKey, efsMountPath, listener)
+        } else {
+            // GitHub Actions cache backend
+            const restoredEntry = await restoreCache(pattern.split('\n'), cacheKey, [], listener)
+            restored = restoredEntry !== undefined
+        }
+
+        if (restored) {
             return new ExtractedCacheEntry(artifactType, pattern, cacheKey)
         } else {
             core.info(`Did not restore ${artifactType} with key ${cacheKey} to ${pattern}`)
@@ -231,7 +252,16 @@ abstract class AbstractEntryExtractor {
             cacheDebug(`No change to previously restored ${artifactType}. Not saving.`)
             entryListener.markNotSaved('contents unchanged')
         } else {
-            await saveCache(pattern.split('\n'), cacheKey, entryListener)
+            const cacheBackend = this.cacheConfig.getCacheBackend()
+
+            if (cacheBackend === CacheBackend.EFS) {
+                // EFS backend
+                const efsMountPath = this.cacheConfig.getEfsCachePath()
+                await saveCacheToEfs(pattern.split('\n'), cacheKey, efsMountPath, entryListener)
+            } else {
+                // GitHub Actions cache backend
+                await saveCache(pattern.split('\n'), cacheKey, entryListener)
+            }
         }
 
         for (const file of matchingFiles) {
