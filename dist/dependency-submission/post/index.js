@@ -117625,7 +117625,14 @@ async function restoreCacheFromEfs(cachePath, cacheKey, efsMountPath, listener) 
                     fs.mkdirSync(targetDir, { recursive: true });
                 }
                 cacheDebug(`Restoring from EFS: ${sourcePath} -> ${targetPath}`);
-                await exec.exec('rsync', ['-a', `${sourcePath}/`, `${targetPath}/`]);
+                await exec.exec('rsync', [
+                    '-rlt',
+                    '--no-perms',
+                    '--no-owner',
+                    '--no-group',
+                    `${sourcePath}/`,
+                    `${targetPath}/`
+                ]);
             }
             else {
                 cacheDebug(`Source path not found in EFS: ${sourcePath}`);
@@ -117657,7 +117664,15 @@ async function saveCacheToEfs(cachePath, cacheKey, efsMountPath, listener) {
             if (fs.existsSync(sourcePath)) {
                 const targetPath = path.join(efsCachePath, path.basename(sourcePath));
                 cacheDebug(`Saving to EFS: ${sourcePath} -> ${targetPath}`);
-                await exec.exec('rsync', ['-a', '--delete', `${sourcePath}/`, `${targetPath}/`]);
+                await exec.exec('rsync', [
+                    '-rlt',
+                    '--no-perms',
+                    '--no-owner',
+                    '--no-group',
+                    '--delete',
+                    `${sourcePath}/`,
+                    `${targetPath}/`
+                ]);
             }
             else {
                 cacheDebug(`Source path not found: ${sourcePath}`);

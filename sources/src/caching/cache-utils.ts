@@ -178,7 +178,15 @@ export async function restoreCacheFromEfs(
                 }
 
                 cacheDebug(`Restoring from EFS: ${sourcePath} -> ${targetPath}`)
-                await exec.exec('rsync', ['-a', `${sourcePath}/`, `${targetPath}/`])
+                // --no-perms, --no-owner, --no-group: Skip permission/ownership preservation (EFS compatibility)
+                await exec.exec('rsync', [
+                    '-rlt',
+                    '--no-perms',
+                    '--no-owner',
+                    '--no-group',
+                    `${sourcePath}/`,
+                    `${targetPath}/`
+                ])
             } else {
                 cacheDebug(`Source path not found in EFS: ${sourcePath}`)
             }
@@ -224,7 +232,16 @@ export async function saveCacheToEfs(
             if (fs.existsSync(sourcePath)) {
                 const targetPath = path.join(efsCachePath, path.basename(sourcePath))
                 cacheDebug(`Saving to EFS: ${sourcePath} -> ${targetPath}`)
-                await exec.exec('rsync', ['-a', '--delete', `${sourcePath}/`, `${targetPath}/`])
+                // --no-perms, --no-owner, --no-group: Skip permission/ownership preservation (EFS compatibility)
+                await exec.exec('rsync', [
+                    '-rlt',
+                    '--no-perms',
+                    '--no-owner',
+                    '--no-group',
+                    '--delete',
+                    `${sourcePath}/`,
+                    `${targetPath}/`
+                ])
             } else {
                 cacheDebug(`Source path not found: ${sourcePath}`)
             }
