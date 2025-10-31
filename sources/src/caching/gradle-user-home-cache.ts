@@ -6,8 +6,16 @@ import path from 'path'
 import fs from 'fs'
 import {generateCacheKey} from './cache-key'
 import {CacheListener} from './cache-reporting'
-import {saveCache, restoreCache, cacheDebug, isCacheDebuggingEnabled, tryDelete} from './cache-utils'
-import {CacheConfig, ACTION_METADATA_DIR} from '../configuration'
+import {
+    saveCache,
+    restoreCache,
+    saveCacheToEfs,
+    restoreCacheFromEfs,
+    cacheDebug,
+    isCacheDebuggingEnabled,
+    tryDelete
+} from './cache-utils'
+import {CacheConfig, CacheBackend, ACTION_METADATA_DIR} from '../configuration'
 import {GradleHomeEntryExtractor, ConfigurationCacheEntryExtractor} from './gradle-home-extry-extractor'
 import {getPredefinedToolchains, mergeToolchainContent, readResourceFileAsString} from './gradle-user-home-utils'
 
@@ -51,23 +59,41 @@ export class GradleUserHomeCache {
      */
     async restore(listener: CacheListener): Promise<void> {
         const entryListener = listener.entry(this.cacheDescription)
-
         const cacheKey = generateCacheKey(this.cacheName, this.cacheConfig)
+        const cachePath = this.getCachePath()
 
         cacheDebug(
             `Requesting ${this.cacheDescription} with
     key:${cacheKey.key}
-    restoreKeys:[${cacheKey.restoreKeys}]`
+    restoreKeys:[${cacheKey.restoreKeys}]
+    backend:${this.cacheConfig.getCacheBackend()}`
         )
 
-        const cachePath = this.getCachePath()
-        const cacheResult = await restoreCache(cachePath, cacheKey.key, cacheKey.restoreKeys, entryListener)
-        if (!cacheResult) {
+        // Check which backend to use
+        const cacheBackend = this.cacheConfig.getCacheBackend()
+        let restored = false
+
+        if (cacheBackend === CacheBackend.EFS) {
+            // EFS backend
+            const efsMountPath = this.cacheConfig.getEfsCachePath()
+            core.info(`Using EFS cache backend at ${efsMountPath}`)
+            restored = await restoreCacheFromEfs(cachePath, cacheKey.key, efsMountPath, entryListener)
+            if (restored) {
+                core.saveState(RESTORED_CACHE_KEY_KEY, cacheKey.key)
+            }
+        } else {
+            // GitHub Actions cache backend (default)
+            const cacheResult = await restoreCache(cachePath, cacheKey.key, cacheKey.restoreKeys, entryListener)
+            if (cacheResult) {
+                core.saveState(RESTORED_CACHE_KEY_KEY, cacheResult.key)
+                restored = true
+            }
+        }
+
+        if (!restored) {
             core.info(`${this.cacheDescription} cache not found. Will initialize empty.`)
             return
         }
-
-        core.saveState(RESTORED_CACHE_KEY_KEY, cacheResult.key)
 
         try {
             await this.afterRestore(listener)
@@ -89,17 +115,22 @@ export class GradleUserHomeCache {
 
     /**
      * Saves the cache entry based on the current cache key unless the cache was restored with the exact key,
-     * in which case we cannot overwrite it.
+     * in which case we cannot overwrite it (for GitHub Actions cache).
      *
      * If the cache entry was restored with a partial match on a restore key, then
      * it is saved with the exact key.
+     *
+     * EFS backend always saves as it supports overwriting.
      */
     async save(listener: CacheListener): Promise<void> {
         const cacheKey = generateCacheKey(this.cacheName, this.cacheConfig).key
         const restoredCacheKey = core.getState(RESTORED_CACHE_KEY_KEY)
         const gradleHomeEntryListener = listener.entry(this.cacheDescription)
+        const cacheBackend = this.cacheConfig.getCacheBackend()
 
-        if (restoredCacheKey && cacheKey === restoredCacheKey) {
+        // For GitHub Actions cache, skip saving if cache key hasn't changed
+        // EFS can overwrite, so we always save for EFS backend
+        if (cacheBackend === CacheBackend.GitHub && restoredCacheKey && cacheKey === restoredCacheKey) {
             core.info(`Cache hit occurred on the cache key ${cacheKey}, not saving cache.`)
 
             for (const entryListener of listener.cacheEntries) {
@@ -120,8 +151,15 @@ export class GradleUserHomeCache {
         }
 
         const cachePath = this.getCachePath()
-        await saveCache(cachePath, cacheKey, gradleHomeEntryListener)
-        return
+
+        // Save based on backend
+        if (cacheBackend === CacheBackend.EFS) {
+            const efsMountPath = this.cacheConfig.getEfsCachePath()
+            core.info(`Saving to EFS cache backend at ${efsMountPath}`)
+            await saveCacheToEfs(cachePath, cacheKey, efsMountPath, gradleHomeEntryListener)
+        } else {
+            await saveCache(cachePath, cacheKey, gradleHomeEntryListener)
+        }
     }
 
     /**

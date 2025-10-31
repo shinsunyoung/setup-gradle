@@ -138,3 +138,131 @@ async function getJavaProcesses(): Promise<string> {
     const jpsOutput = await exec.getExecOutput('jps', ['-lm'])
     return jpsOutput.stdout
 }
+
+/**
+ * Restore cache from EFS mount point
+ */
+export async function restoreCacheFromEfs(
+    cachePath: string[],
+    cacheKey: string,
+    efsMountPath: string,
+    listener: CacheEntryListener
+): Promise<boolean> {
+    listener.markRequested(cacheKey, [])
+
+    const efsCachePath = path.join(efsMountPath, cacheKey)
+
+    if (!fs.existsSync(efsMountPath)) {
+        listener.markNotRestored(`EFS mount path not found: ${efsMountPath}`)
+        core.warning(`EFS mount path not found: ${efsMountPath}`)
+        return false
+    }
+
+    if (!fs.existsSync(efsCachePath)) {
+        listener.markNotRestored('Cache not found in EFS')
+        cacheDebug(`Cache not found in EFS at: ${efsCachePath}`)
+        return false
+    }
+
+    try {
+        const startTime = Date.now()
+
+        // EFS에서 로컬로 복사
+        for (const targetPath of cachePath) {
+            const sourcePath = path.join(efsCachePath, path.basename(targetPath))
+            if (fs.existsSync(sourcePath)) {
+                // 대상 디렉토리가 없으면 생성
+                const targetDir = path.dirname(targetPath)
+                if (!fs.existsSync(targetDir)) {
+                    fs.mkdirSync(targetDir, {recursive: true})
+                }
+
+                cacheDebug(`Restoring from EFS: ${sourcePath} -> ${targetPath}`)
+                await exec.exec('rsync', ['-a', `${sourcePath}/`, `${targetPath}/`])
+            } else {
+                cacheDebug(`Source path not found in EFS: ${sourcePath}`)
+            }
+        }
+
+        const restoreTime = Date.now() - startTime
+        const size = await getDirectorySize(efsCachePath)
+        listener.markRestored(cacheKey, size, restoreTime)
+        core.info(`Restored cache from EFS: ${cacheKey} (${formatBytes(size)}) in ${restoreTime}ms`)
+        return true
+    } catch (error) {
+        listener.markNotRestored((error as Error).message)
+        core.warning(`Failed to restore from EFS: ${error}`)
+        return false
+    }
+}
+
+/**
+ * Save cache to EFS mount point
+ */
+export async function saveCacheToEfs(
+    cachePath: string[],
+    cacheKey: string,
+    efsMountPath: string,
+    listener: CacheEntryListener
+): Promise<void> {
+    if (!fs.existsSync(efsMountPath)) {
+        listener.markNotSaved(`EFS mount path not found: ${efsMountPath}`)
+        core.warning(`EFS mount path not found: ${efsMountPath}`)
+        return
+    }
+
+    const efsCachePath = path.join(efsMountPath, cacheKey)
+
+    try {
+        const startTime = Date.now()
+
+        // EFS 캐시 디렉토리 생성
+        fs.mkdirSync(efsCachePath, {recursive: true})
+
+        // 로컬에서 EFS로 복사
+        for (const sourcePath of cachePath) {
+            if (fs.existsSync(sourcePath)) {
+                const targetPath = path.join(efsCachePath, path.basename(sourcePath))
+                cacheDebug(`Saving to EFS: ${sourcePath} -> ${targetPath}`)
+                await exec.exec('rsync', ['-a', '--delete', `${sourcePath}/`, `${targetPath}/`])
+            } else {
+                cacheDebug(`Source path not found: ${sourcePath}`)
+            }
+        }
+
+        const saveTime = Date.now() - startTime
+        const size = await getDirectorySize(efsCachePath)
+        listener.markSaved(cacheKey, size, saveTime)
+        core.info(`Saved cache to EFS: ${cacheKey} (${formatBytes(size)}) in ${saveTime}ms`)
+    } catch (error) {
+        listener.markNotSaved((error as Error).message)
+        core.warning(`Failed to save to EFS: ${error}`)
+    }
+}
+
+/**
+ * Get directory size in bytes
+ */
+async function getDirectorySize(dirPath: string): Promise<number> {
+    try {
+        const result = await exec.getExecOutput('du', ['-sb', dirPath], {silent: true, ignoreReturnCode: true})
+        if (result.exitCode === 0) {
+            const size = parseInt(result.stdout.split('\t')[0])
+            return isNaN(size) ? 0 : size
+        }
+    } catch (error) {
+        cacheDebug(`Failed to get directory size: ${error}`)
+    }
+    return 0
+}
+
+/**
+ * Format bytes to human readable string
+ */
+function formatBytes(bytes: number): string {
+    if (bytes === 0) return '0 Bytes'
+    const k = 1024
+    const sizes = ['Bytes', 'KB', 'MB', 'GB']
+    const i = Math.floor(Math.log(bytes) / Math.log(k))
+    return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i]
+}

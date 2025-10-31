@@ -185,12 +185,39 @@ export class CacheConfig {
     getCacheExcludes(): string[] {
         return core.getMultilineInput('gradle-home-cache-excludes')
     }
+
+    getCacheBackend(): CacheBackend {
+        const val = core.getInput('cache-backend')
+        switch (val.toLowerCase().trim()) {
+            case '':
+            case 'github':
+                return CacheBackend.GitHub
+            case 'efs':
+                return CacheBackend.EFS
+        }
+        throw TypeError(
+            `The value '${val}' is not valid for cache-backend. Valid values are: [github, efs].`
+        )
+    }
+
+    getEfsCachePath(): string {
+        const val = core.getInput('efs-cache-path')
+        if (this.getCacheBackend() === CacheBackend.EFS && !val) {
+            throw TypeError('efs-cache-path is required when cache-backend is set to efs')
+        }
+        return val
+    }
 }
 
 export enum CacheCleanupOption {
     Never = 'never',
     OnSuccess = 'on-success',
     Always = 'always'
+}
+
+export enum CacheBackend {
+    GitHub = 'github',
+    EFS = 'efs'
 }
 
 export class SummaryConfig {

@@ -43,11 +43,26 @@ inputs:
   cache-cleanup:
     description: |
       Specifies if the action should attempt to remove any stale/unused entries from the Gradle User Home prior to saving to the GitHub Actions cache.
-      By default ('on-success'), cleanup is performed when all Gradle builds succeed for the Job. 
+      By default ('on-success'), cleanup is performed when all Gradle builds succeed for the Job.
       This behaviour can be disabled ('never'), or configured to always run irrespective of the build outcome ('always').
       Valid values are 'never', 'on-success' and 'always'.
     required: false
     default: 'on-success'
+
+  cache-backend:
+    description: |
+      Cache backend to use. Valid values are 'github' (default) and 'efs'.
+      - 'github': Use GitHub Actions cache (default, 10GB limit, 7-day retention)
+      - 'efs': Use EFS mounted on self-hosted runner (requires efs-cache-path)
+    required: false
+    default: 'github'
+
+  efs-cache-path:
+    description: |
+      Path to the EFS mount point for caching (required when cache-backend is 'efs').
+      Example: '/mnt/efs/gradle-cache'
+      This directory should be on an EFS volume mounted to your self-hosted runner.
+    required: false
 
   gradle-home-cache-cleanup:
     description: When 'true', the action will attempt to remove any stale/unused entries from the Gradle User Home prior to saving to the GitHub Actions cache.
